@@ -97,6 +97,12 @@ jobs:
                       rpi-indo
           fi
 
+          # make sure directory exists
+          mkdir -p /var/log/rpi-indo/system-health
+          mkdir -p /var/log/rpi-indo/mqtt-client
+          mkdir -p /var/log/rpi-indo/fleet-agent
+          mkdir -p /var/log/rpi-indo/ffmpegdata
+
           # Ownership
           chown -R rpi-indo:rpi-indo /opt/rpi-indo/
           chown -R rpi-indo:rpi-indo /etc/rpi-indo/
