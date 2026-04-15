@@ -1,0 +1,290 @@
+name: Build Debian Package for Rpi Indo
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Package version (e.g. 1.0.0)"
+        required: true
+        default: "1.0.0"
+
+permissions:
+  contents: write
+
+jobs:
+  build-deb:
+    name: Build RpiIndo_${{ github.event.inputs.version }}_armhf.deb
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install packaging tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dpkg-dev debhelper
+
+      - name: Build Debian package structure
+        run: |
+          VERSION="${{ github.event.inputs.version }}"
+          PKG_NAME="rpi-indo"
+          PKG_DIR="${PKG_NAME}_${VERSION}_armhf"
+
+          # ── Directory layout ────────────────────────────────────────
+          mkdir -p ${PKG_DIR}/DEBIAN
+          mkdir -p ${PKG_DIR}/opt/rpi-indo/system-health/
+          mkdir -p ${PKG_DIR}/opt/rpi-indo/mqtt-client/
+          mkdir -p ${PKG_DIR}/opt/rpi-indo/fleet-agent/
+          mkdir -p ${PKG_DIR}/opt/rpi-indo/ffmpegdata/
+          mkdir -p ${PKG_DIR}/lib/systemd/system/
+          mkdir -p ${PKG_DIR}/etc/rpi-indo/system-health/
+          mkdir -p ${PKG_DIR}/etc/rpi-indo/mqtt-client/
+          mkdir -p ${PKG_DIR}/etc/rpi-indo/fleet-agent/
+          mkdir -p ${PKG_DIR}/etc/rpi-indo/ffmpegdata/
+          mkdir -p ${PKG_DIR}/log/rpi-indo/system-health/
+          mkdir -p ${PKG_DIR}/log/rpi-indo/mqtt-client/
+          mkdir -p ${PKG_DIR}/log/rpi-indo/fleet-agent/
+          mkdir -p ${PKG_DIR}/log/rpi-indo/ffmpegdata/
+          
+          # ── Copy application files ──────────────────────────────────
+          echo dir
+          pwd
+
+           ls -la
+          tree -L 7
+
+          cp -r ./system-health/ ${PKG_DIR}/opt/rpi-indo/
+          cp -r ./mqtt-client/ ${PKG_DIR}/opt/rpi-indo/
+          cp -r ./fleet-agent/ ${PKG_DIR}/opt/rpi-indo/
+          cp -r ./mqtt-client/ ${PKG_DIR}/opt/rpi-indo/
+          cp -r ./ffmpegdata/ ${PKG_DIR}/opt/rpi-indo/
+
+          # ── DEBIAN/control ──────────────────────────────────────────
+          cat > ${PKG_DIR}/DEBIAN/control <<EOF
+          Package: ${PKG_NAME}
+          Version: ${VERSION}
+          Section: utils
+          Priority: optional
+          Architecture: armhf
+          Depends: python3 (>= 3.8), python3-pip
+          Maintainer: Main <your@email.com>
+          Description: RPi Indo - System Health & MQTT Client
+           Bundles two services for Raspberry Pi (armhf):
+             - PythonScript : monitors CPU, memory, disk, temperature
+             - PythonScriptSysd   : MQTT message broker client
+           Both are installed under /opt/rpi-indo and managed by systemd.
+          EOF
+
+          # ── DEBIAN/conffiles ────────────────────────────────────────
+          cat > ${PKG_DIR}/DEBIAN/conffiles <<EOF
+          /etc/rpi-indo/system-health/
+          /etc/rpi-indo/mqtt-client/
+          /etc/rpi-indo/fleet-agent/
+          /etc/rpi-indo/ffmpegdata/
+          EOF
+
+          # ── DEBIAN/postinst ─────────────────────────────────────────
+          cat > ${PKG_DIR}/DEBIAN/postinst <<'POSTINST'
+          #!/bin/bash
+          set -e
+
+          # Create shared service user once
+          if ! id -u rpi-indo &>/dev/null; then
+              useradd --system --no-create-home \
+                      --shell /usr/sbin/nologin \
+                      --comment "rpi-indo service user" \
+                      rpi-indo
+          fi
+
+          # Ownership
+          chown -R rpi-indo:rpi-indo /opt/rpi-indo/
+          chown -R rpi-indo:rpi-indo /etc/rpi-indo/
+          chown -R rpi-indo:rpi-indo /var/log/rpi-indo/
+
+          # Install Python deps for each service
+          for SERVICE in system-health mqtt-client fleet-agent video-record video-upload; do
+              REQ="/opt/rpi-indo/${SERVICE}/requirements.txt"
+              if [ -f "${REQ}" ]; then
+                  echo "Installing Python dependencies for ${SERVICE}..."
+                  python3 -m pip install --quiet --no-cache-dir -r "${REQ}"
+              fi
+          done
+          POSTINST
+          chmod 755 ${PKG_DIR}/DEBIAN/postinst
+
+          # ── DEBIAN/prerm ────────────────────────────────────────────
+          cat > ${PKG_DIR}/DEBIAN/prerm <<'PRERM'
+          #!/bin/bash
+          set -e
+          for SERVICE in rpi-indo-system-health rpi-indo-mqtt-client rpi-indo-fleet-agent rpi-indo-video-record rpi-indo-video-upload; do
+              systemctl stop    ${SERVICE}.service || true
+              systemctl disable ${SERVICE}.service || true
+          done
+          PRERM
+          chmod 755 ${PKG_DIR}/DEBIAN/prerm
+
+          # ── DEBIAN/postrm ───────────────────────────────────────────
+          cat > ${PKG_DIR}/DEBIAN/postrm <<'POSTRM'
+          #!/bin/bash
+          set -e
+          systemctl daemon-reload || true
+          if [ "$1" = "purge" ]; then
+              rm -rf /opt/rpi-indo/
+              rm -rf /etc/rpi-indo/
+              rm -rf /var/log/rpi-indo/
+              userdel rpi-indo 2>/dev/null || true
+          fi
+          POSTRM
+          chmod 755 ${PKG_DIR}/DEBIAN/postrm
+
+          # ── systemd: system-health.service ─────────────────
+          cat > ${PKG_DIR}/lib/systemd/system/system-health.service <<EOF
+          [Unit]
+          Description=RPi Indo - System Health Monitor
+          Documentation=https://github.com/${{ github.repository }}
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=simple
+          User=rpiindo
+          Group=rpiindo
+          WorkingDirectory=/opt/rpi-indo/system-health/
+          ExecStart=/usr/bin/python3 /opt/rpi-indo/system-health/main.py
+          ExecReload=/bin/kill -HUP \$MAINPID
+          Restart=on-failure
+          RestartSec=10s
+          TimeoutStopSec=30s
+          StandardOutput=journal
+          StandardError=journal
+          SyslogIdentifier=rpi-indo-system-health
+          NoNewPrivileges=true
+          ProtectSystem=strict
+          ReadWritePaths=/opt/rpi-indo/system-health /etc/rpi-indo/system-health /var/log/rpi-indo/system-health
+          PrivateTmp=true
+
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+
+          # ── systemd: mqtt-client.service ─────────────────
+          cat > ${PKG_DIR}/lib/systemd/system/mqtt-client.service <<EOF
+          [Unit]
+          Description=RPi Indo - System Health Monitor
+          Documentation=https://github.com/${{ github.repository }}
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=simple
+          User=rpiindo
+          Group=rpiindo
+          WorkingDirectory=/opt/rpi-indo/mqtt-client/
+          ExecStart=/usr/bin/python3 /opt/rpi-indo/mqtt-client/main.py
+          ExecReload=/bin/kill -HUP \$MAINPID
+          Restart=on-failure
+          RestartSec=10s
+          TimeoutStopSec=30s
+          StandardOutput=journal
+          StandardError=journal
+          SyslogIdentifier=rpi-indo-mqtt-client
+          NoNewPrivileges=true
+          ProtectSystem=strict
+          ReadWritePaths=/opt/rpi-indo/mqtt-client/ /etc/rpi-indo/mqtt-client/ /var/log/rpi-indo/mqtt-client/
+          PrivateTmp=true
+
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+
+          # ── systemd: fleet-agent.service ─────────────────
+          cat > ${PKG_DIR}/lib/systemd/system/fleet-agent.service <<EOF
+          [Unit]
+          Description=RPi Indo - System Health Monitor
+          Documentation=https://github.com/${{ github.repository }}
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=simple
+          User=rpiindo
+          Group=rpiindo
+          WorkingDirectory=/opt/rpi-indo/fleet-agent/
+          ExecStart=/usr/bin/python3 /opt/rpi-indo/fleet-agent/main.py
+          ExecReload=/bin/kill -HUP \$MAINPID
+          Restart=on-failure
+          RestartSec=10s
+          TimeoutStopSec=30s
+          StandardOutput=journal
+          StandardError=journal
+          SyslogIdentifier=rpi-indo-fleet-agent
+          NoNewPrivileges=true
+          ProtectSystem=strict
+          ReadWritePaths=/opt/rpi-indo/fleet-agent /etc/rpi-indo/fleet-agent /var/log/rpi-indo/fleet-agent
+          PrivateTmp=true
+
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+
+          echo "PKG_DIR=${PKG_DIR}" >> $GITHUB_ENV
+          echo "VERSION=${VERSION}"   >> $GITHUB_ENV
+
+      - name: Build .deb
+        run: |
+          dpkg-deb --build --root-owner-group "${{ env.PKG_DIR }}"
+          echo "=== Package info ==="
+          dpkg-deb --info rpi-indo_${{ github.event.inputs.version }}_armhf.deb
+          echo "=== Package contents ==="
+          dpkg-deb --contents rpi-indo_${{ github.event.inputs.version }}_armhf.deb
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rpi-indo_${{ github.event.inputs.version }}_armhf
+          path: "rpi-indo_${{ github.event.inputs.version }}_armhf.deb"
+          retention-days: 30
+
+      - name: Create GitHub Release and attach .deb
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "v${{ github.event.inputs.version }}"
+          name: "Release v${{ github.event.inputs.version }}"
+          draft: false
+          prerelease: false
+          files: "rpi-indo_${{ github.event.inputs.version }}_armhf.deb"
+          body: |
+            ## rpi-indo v${{ github.event.inputs.version }}
+
+            Single `.deb` bundling **PythonScript** and **PythonScriptSysd** services.
+
+            ### Install on Raspberry Pi (armhf)
+            ```bash
+            wget https://github.com/${{ github.repository }}/releases/download/v${{ github.event.inputs.version }}/rpi-indo_${{ github.event.inputs.version }}_armhf.deb
+            sudo dpkg -i rpi-indo_${{ github.event.inputs.version }}_armhf.deb
+            sudo apt-get install -f          # resolve any missing deps
+            ```
+
+            ### Verify services
+            ```bash
+            sudo systemctl status system-health.service
+            sudo systemctl status mqtt-client.service
+            sudo systemctl status fleet-agent.service
+            sudo systemctl status video-record.service
+            sudo systemctl status video-upload.service
+
+            journalctl -u system-health.service -f
+            journalctl -u mqtt-client.service -f
+            journalctl -u fleet-agent.service -f
+            journalctl -u video-record.service -f
+            journalctl -u video-upload.service -f
+            ```
+
+            ### Uninstall
+            ```bash
+            sudo apt-get remove rpi-indo   # keep config files
+            sudo apt-get purge  rpi-indo   # remove everything
+            ```
+
+          
